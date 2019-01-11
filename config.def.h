@@ -53,11 +53,15 @@ static const bool ANTI_ALIAS = true;
  */
 static const bool ALPHA_LAYER = false;
 
+/* if true, default hide bar
+ */
+static const bool HIDE_BAR = true;
+
 #endif
 #ifdef _THUMBS_CONFIG
 
 /* thumbnail sizes in pixels (width == height): */
-static const int thumb_sizes[] = { 32, 64, 96, 128, 224 };
+static const int thumb_sizes[] = { 32, 64, 96, 128, 224, 320, 5122 };
 
 /* thumbnail size at startup, index into thumb_sizes[]: */
 static const int THUMB_SIZE = 4;
