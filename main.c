@@ -16,33 +16,23 @@
  * along with sxiv.  If not, see <http://www.gnu.org/licenses/>.
  */
 
+#include "sxiv.h"
+#define _MAPPINGS_CONFIG
+#include "config.h"
+
 #include <stdlib.h>
-#include <stdio.h>
-#include <stdarg.h>
 #include <string.h>
 #include <fcntl.h>
 #include <unistd.h>
 #include <errno.h>
+#include <locale.h>
 #include <signal.h>
 #include <sys/select.h>
 #include <sys/stat.h>
-#include <sys/time.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <X11/keysym.h>
 #include <X11/XF86keysym.h>
-
-#include "types.h"
-#include "commands.h"
-#include "image.h"
-#include "options.h"
-#include "thumbs.h"
-#include "util.h"
-#include "window.h"
-#include "autoreload.h"
-
-#define _MAPPINGS_CONFIG
-#include "config.h"
 
 typedef struct {
 	struct timeval when;
@@ -67,6 +57,7 @@ fileinfo_t *files;
 int filecnt, fileidx;
 int alternate;
 int markcnt;
+int markidx;
 
 int prefix;
 bool extprefix;
@@ -82,7 +73,7 @@ struct {
   extcmd_t f;
   int fd;
   unsigned int i, lastsep;
-  bool open;
+  pid_t pid;
 } info;
 
 struct {
@@ -98,6 +89,10 @@ timeout_t timeouts[] = {
 	{ { 0, 0 }, false, clear_resize },
 };
 
+cursor_t imgcursor[3] = {
+	CURSOR_ARROW, CURSOR_ARROW, CURSOR_ARROW
+};
+
 void cleanup(void)
 {
 	img_close(&img, false);
@@ -109,7 +104,6 @@ void cleanup(void)
 void check_add_file(char *filename, bool given)
 {
 	char *path;
-	const char *bn;
 
 	if (*filename == '\0')
 		return;
@@ -130,10 +124,6 @@ void check_add_file(char *filename, bool given)
 
 	files[fileidx].name = estrdup(filename);
 	files[fileidx].path = path;
-	if ((bn = strrchr(files[fileidx].name , '/')) != NULL && bn[1] != '\0')
-		files[fileidx].base = ++bn;
-	else
-		files[fileidx].base = files[fileidx].name;
 	if (given)
 		files[fileidx].flags |= FF_WARN;
 	fileidx++;
@@ -165,10 +155,12 @@ void remove_file(int n, bool manual)
 		memmove(files + n, files + n + 1, (filecnt - n - 1) * sizeof(*files));
 	}
 	filecnt--;
-	if (fileidx >= filecnt)
-		fileidx = filecnt - 1;
-	if (n < alternate)
+	if (fileidx > n || fileidx == filecnt)
+		fileidx--;
+	if (alternate > n || alternate == filecnt)
 		alternate--;
+	if (markidx > n || markidx == filecnt)
+		markidx--;
 }
 
 void set_timeout(timeout_f handler, int time, bool overwrite)
@@ -224,24 +216,26 @@ bool check_timeouts(struct timeval *t)
 	return tmin > 0;
 }
 
+void close_info(void)
+{
+	if (info.fd != -1) {
+		kill(info.pid, SIGTERM);
+		close(info.fd);
+		info.fd = -1;
+	}
+}
+
 void open_info(void)
 {
-	static pid_t pid;
 	int pfd[2];
 	char w[12], h[12];
 
-	if (info.f.err != 0 || info.open || win.bar.h == 0)
+	if (info.f.err != 0 || info.fd >= 0 || win.bar.h == 0)
 		return;
-	if (info.fd != -1) {
-		close(info.fd);
-		kill(pid, SIGTERM);
-		info.fd = -1;
-	}
 	win.bar.l.buf[0] = '\0';
-
 	if (pipe(pfd) < 0)
 		return;
-	if ((pid = fork()) == 0) {
+	if ((info.pid = fork()) == 0) {
 		close(pfd[0]);
 		dup2(pfd[1], 1);
 		snprintf(w, sizeof(w), "%d", img.w);
@@ -250,13 +244,12 @@ void open_info(void)
 		error(EXIT_FAILURE, errno, "exec: %s", info.f.cmd);
 	}
 	close(pfd[1]);
-	if (pid < 0) {
+	if (info.pid < 0) {
 		close(pfd[0]);
 	} else {
 		fcntl(pfd[0], F_SETFL, O_NONBLOCK);
 		info.fd = pfd[0];
 		info.i = info.lastsep = 0;
-		info.open = true;
 	}
 }
 
@@ -289,13 +282,12 @@ end:
 	info.i -= info.lastsep;
 	win.bar.l.buf[info.i] = '\0';
 	win_draw(&win);
-	close(info.fd);
-	info.fd = -1;
-	while (waitpid(-1, NULL, WNOHANG) > 0);
+	close_info();
 }
 
 void load_image(int new)
 {
+	bool prev = new < fileidx;
 	static int current;
 
 	if (new < 0 || new >= filecnt)
@@ -313,13 +305,13 @@ void load_image(int new)
 		remove_file(new, false);
 		if (new >= filecnt)
 			new = filecnt - 1;
-		else if (new > 0 && new < fileidx)
+		else if (new > 0 && prev)
 			new--;
 	}
 	files[new].flags &= ~FF_WARN;
 	fileidx = current = new;
 
-	info.open = false;
+	close_info();
 	open_info();
 	arl_setup(&arl, files[fileidx].path);
 
@@ -327,6 +319,19 @@ void load_image(int new)
 		set_timeout(animate, img.multi.frames[img.multi.sel].delay, true);
 	else
 		reset_timeout(animate);
+}
+
+bool mark_image(int n, bool on)
+{
+	markidx = n;
+	if (!!(files[n].flags & FF_MARK) != on) {
+		files[n].flags ^= FF_MARK;
+		markcnt += on ? 1 : -1;
+		if (mode == MODE_THUMB)
+			tns_mark(&tns, n, on);
+		return true;
+	}
+	return false;
 }
 
 void bar_put(win_bar_t *bar, const char *fmt, ...)
@@ -340,21 +345,13 @@ void bar_put(win_bar_t *bar, const char *fmt, ...)
 	va_end(ap);
 }
 
+#define BAR_SEP "  "
+
 void update_info(void)
 {
 	unsigned int i, fn, fw;
-	char title[256];
 	const char * mark;
-	bool ow_info;
 	win_bar_t *l = &win.bar.l, *r = &win.bar.r;
-
-	/* update window title */
-	if (mode == MODE_THUMB) {
-		win_set_title(&win, "sxiv");
-	} else {
-		snprintf(title, sizeof(title), "sxiv - %s", files[fileidx].name);
-		win_set_title(&win, title);
-	}
 
 	/* update bar contents */
 	if (win.bar.h == 0)
@@ -364,45 +361,40 @@ void update_info(void)
 	l->p = l->buf;
 	r->p = r->buf;
 	if (mode == MODE_THUMB) {
-		if (tns.loadnext < tns.end) {
+		if (tns.loadnext < tns.end)
 			bar_put(l, "Loading... %0*d", fw, tns.loadnext + 1);
-			ow_info = false;
-		} else if (tns.initnext < filecnt) {
+		else if (tns.initnext < filecnt)
 			bar_put(l, "Caching... %0*d", fw, tns.initnext + 1);
-			ow_info = false;
-		} else {
-			ow_info = true;
-		}
+		else
+			strncpy(l->buf, files[fileidx].name, l->size);
 		bar_put(r, "%s%0*d/%d", mark, fw, fileidx + 1, filecnt);
 	} else {
 		bar_put(r, "%s", mark);
 		if (img.ss.on) {
 			if (img.ss.delay % 10 != 0)
-				bar_put(r, "%2.1fs | ", (float)img.ss.delay / 10);
+				bar_put(r, "%2.1fs" BAR_SEP, (float)img.ss.delay / 10);
 			else
-				bar_put(r, "%ds | ", img.ss.delay / 10);
+				bar_put(r, "%ds" BAR_SEP, img.ss.delay / 10);
 		}
 		if (img.gamma != 0)
-			bar_put(r, "G%+d | ", img.gamma);
-		bar_put(r, "%3d%% | ", (int) (img.zoom * 100.0));
+			bar_put(r, "G%+d" BAR_SEP, img.gamma);
+		bar_put(r, "%3d%%" BAR_SEP, (int) (img.zoom * 100.0));
 		if (img.multi.cnt > 0) {
 			for (fn = 0, i = img.multi.cnt; i > 0; fn++, i /= 10);
-			bar_put(r, "%0*d/%d | ", fn, img.multi.sel + 1, img.multi.cnt);
+			bar_put(r, "%0*d/%d" BAR_SEP, fn, img.multi.sel + 1, img.multi.cnt);
 		}
 		bar_put(r, "%0*d/%d", fw, fileidx + 1, filecnt);
-		ow_info = info.f.err != 0;
-	}
-	if (ow_info) {
-		fn = strlen(files[fileidx].name);
-		if (fn < l->size &&
-		    win_textwidth(&win.env, files[fileidx].name, fn, true) +
-		    win_textwidth(&win.env, r->buf, r->p - r->buf, true) < win.w)
-		{
+		if (info.f.err)
 			strncpy(l->buf, files[fileidx].name, l->size);
-		} else {
-			strncpy(l->buf, files[fileidx].base, l->size);
-		}
 	}
+}
+
+int ptr_third_x(void)
+{
+	int x, y;
+
+	win_cursor_pos(&win, &x, &y);
+	return MAX(0, MIN(2, (x / (win.w * 0.33))));
 }
 
 void redraw(void)
@@ -428,14 +420,18 @@ void redraw(void)
 
 void reset_cursor(void)
 {
-	int i;
+	int c, i;
 	cursor_t cursor = CURSOR_NONE;
 
 	if (mode == MODE_IMAGE) {
 		for (i = 0; i < ARRLEN(timeouts); i++) {
 			if (timeouts[i].handler == reset_cursor) {
-				if (timeouts[i].active)
-					cursor = CURSOR_ARROW;
+				if (timeouts[i].active) {
+					c = ptr_third_x();
+					c = MAX(fileidx > 0 ? 0 : 1, c);
+					c = MIN(fileidx + 1 < filecnt ? 2 : 1, c);
+					cursor = imgcursor[c];
+				}
 				break;
 			}
 		}
@@ -478,7 +474,7 @@ void run_key_handler(const char *key, unsigned int mask)
 	FILE *pfs;
 	bool marked = mode == MODE_THUMB && markcnt > 0;
 	bool changed = false;
-	int f, i, pfd[2], status;
+	int f, i, pfd[2];
 	int fcnt = marked ? markcnt : 1;
 	char kstr[32];
 	struct stat *oldst, st;
@@ -505,6 +501,7 @@ void run_key_handler(const char *key, unsigned int mask)
 	}
 	oldst = emalloc(fcnt * sizeof(*oldst));
 
+	close_info();
 	strncpy(win.bar.l.buf, "Running key handler...", win.bar.l.size);
 	win_draw(&win);
 	win_set_cursor(&win, CURSOR_WATCH);
@@ -535,9 +532,7 @@ void run_key_handler(const char *key, unsigned int mask)
 		}
 	}
 	fclose(pfs);
-	waitpid(pid, &status, 0);
-	if (!WIFEXITED(status) || WEXITSTATUS(status) != 0)
-		error(0, 0, "%s: Exited abnormally", keyhandler.f.cmd);
+	while (waitpid(pid, NULL, 0) == -1 && errno == EINTR);
 
 	for (f = i = 0; f < fcnt; i++) {
 		if ((marked && (files[i].flags & FF_MARK)) || (!marked && i == fileidx)) {
@@ -561,8 +556,7 @@ end:
 		if (changed) {
 			img_close(&img, true);
 			load_image(fileidx);
-		} else if (info.f.err == 0) {
-			info.open = false;
+		} else {
 			open_info();
 		}
 	}
@@ -576,19 +570,20 @@ end:
 void on_keypress(XKeyEvent *kev)
 {
 	int i;
-	unsigned int sh;
+	unsigned int sh = 0;
 	KeySym ksym, shksym;
-	char key;
+	char dummy, key;
 	bool dirty = false;
+
+	XLookupString(kev, &key, 1, &ksym, NULL);
 
 	if (kev->state & ShiftMask) {
 		kev->state &= ~ShiftMask;
-		XLookupString(kev, &key, 1, &shksym, NULL);
+		XLookupString(kev, &dummy, 1, &shksym, NULL);
 		kev->state |= ShiftMask;
+		if (ksym != shksym)
+			sh = ShiftMask;
 	}
-	XLookupString(kev, &key, 1, &ksym, NULL);
-	sh = (kev->state & ShiftMask) && ksym != shksym ? ShiftMask : 0;
-
 	if (IsModifierKey(ksym))
 		return;
 	if (ksym == XK_Escape && MODMASK(kev->state) == 0) {
@@ -622,8 +617,8 @@ void on_buttonpress(XButtonEvent *bev)
 	static Time firstclick;
 
 	if (mode == MODE_IMAGE) {
-		win_set_cursor(&win, CURSOR_ARROW);
 		set_timeout(reset_cursor, TO_CURSOR_HIDE, true);
+		reset_cursor();
 
 		for (i = 0; i < ARRLEN(buttons); i++) {
 			if (buttons[i].button == bev->button &&
@@ -660,10 +655,19 @@ void on_buttonpress(XButtonEvent *bev)
 				break;
 			case Button3:
 				if ((sel = tns_translate(&tns, bev->x, bev->y)) >= 0) {
-					files[sel].flags ^= FF_MARK;
-					markcnt += files[sel].flags & FF_MARK ? 1 : -1;
-					tns_mark(&tns, sel, !!(files[sel].flags & FF_MARK));
-					redraw();
+					bool on = !(files[sel].flags & FF_MARK);
+					XEvent e;
+
+					for (;;) {
+						if (sel >= 0 && mark_image(sel, on))
+							redraw();
+						XMaskEvent(win.env.dpy,
+						           ButtonPressMask | ButtonReleaseMask | PointerMotionMask, &e);
+						if (e.type == ButtonPress || e.type == ButtonRelease)
+							break;
+						while (XCheckTypedEvent(win.env.dpy, MotionNotify, &e));
+						sel = tns_translate(&tns, e.xbutton.x, e.xbutton.y);
+					}
 				}
 				break;
 			case Button4:
@@ -726,6 +730,7 @@ void run(void)
 					if (arl_handle(&arl)) {
 						/* when too fast, imlib2 can't load the image */
 						nanosleep(&ten_ms, NULL);
+						img_close(&img, true);
 						load_image(fileidx);
 						redraw();
 					}
@@ -741,6 +746,7 @@ void run(void)
 				XPeekEvent(win.env.dpy, &nextev);
 				switch (ev.type) {
 					case ConfigureNotify:
+					case MotionNotify:
 						discard = ev.type == nextev.type;
 						break;
 					case KeyPress:
@@ -782,8 +788,8 @@ void run(void)
 				break;
 			case MotionNotify:
 				if (mode == MODE_IMAGE) {
-					win_set_cursor(&win, CURSOR_ARROW);
 					set_timeout(reset_cursor, TO_CURSOR_HIDE, true);
+					reset_cursor();
 				}
 				break;
 		}
@@ -793,6 +799,22 @@ void run(void)
 int fncmp(const void *a, const void *b)
 {
 	return strcoll(((fileinfo_t*) a)->name, ((fileinfo_t*) b)->name);
+}
+
+void sigchld(int sig)
+{
+	while (waitpid(-1, NULL, WNOHANG) > 0);
+}
+
+void setup_signal(int sig, void (*handler)(int sig))
+{
+	struct sigaction sa;
+
+	sa.sa_handler = handler;
+	sigemptyset(&sa.sa_mask);
+	sa.sa_flags = SA_RESTART | SA_NOCLDSTOP;
+	if (sigaction(sig, &sa, 0) == -1)
+		error(EXIT_FAILURE, errno, "signal %d", sig);
 }
 
 int main(int argc, char **argv)
@@ -805,7 +827,10 @@ int main(int argc, char **argv)
 	struct stat fstats;
 	r_dir_t dir;
 
-	signal(SIGPIPE, SIG_IGN);
+	setup_signal(SIGCHLD, sigchld);
+	setup_signal(SIGPIPE, SIG_IGN);
+
+	setlocale(LC_COLLATE, "");
 
 	parse_options(argc, argv);
 
@@ -855,7 +880,7 @@ int main(int argc, char **argv)
 				continue;
 			}
 			start = fileidx;
-			while ((filename = r_readdir(&dir)) != NULL) {
+			while ((filename = r_readdir(&dir, true)) != NULL) {
 				check_add_file(filename, false);
 				free((void*) filename);
 			}
@@ -870,6 +895,14 @@ int main(int argc, char **argv)
 
 	filecnt = fileidx;
 	fileidx = options->startnum < filecnt ? options->startnum : 0;
+
+	for (i = 0; i < ARRLEN(buttons); i++) {
+		if (buttons[i].cmd == i_cursor_navigate) {
+			imgcursor[0] = CURSOR_LEFT;
+			imgcursor[2] = CURSOR_RIGHT;
+			break;
+		}
+	}
 
 	win_init(&win);
 	img_init(&img, &win);

@@ -40,6 +40,9 @@ enum { SLIDESHOW_DELAY = 5 };
 static const double GAMMA_MAX   = 10.0;
 static const int    GAMMA_RANGE = 32;
 
+/* command i_scroll pans image 1/PAN_FRACTION of screen width/height */
+static const int PAN_FRACTION = 5;
+
 /* if false, pixelate images at zoom level != 100%,
  * toggled with 'a' key binding
  */
@@ -87,8 +90,9 @@ static const keymap_t keys[] = {
 	{ 0,            XK_minus,         g_zoom,               -1 },
 	{ 0,            XK_KP_Subtract,   g_zoom,               -1 },
 	{ 0,            XK_m,             g_toggle_image_mark,  None },
-	{ 0,            XK_M,             g_reverse_marks,      None },
-	{ ControlMask,  XK_m,             g_unmark_all,         None },
+	{ 0,            XK_M,             g_mark_range,         None },
+	{ ControlMask,  XK_m,             g_reverse_marks,      None },
+	{ ControlMask,  XK_u,             g_unmark_all,         None },
 	{ 0,            XK_N,             g_navigate_marked,    +1 },
 	{ 0,            XK_P,             g_navigate_marked,    -1 },
 	{ 0,            XK_braceleft,     g_change_gamma,       -1 },
@@ -171,17 +175,11 @@ static const keymap_t keys[] = {
 /* mouse button mappings for image mode: */
 static const button_t buttons[] = {
 	/* modifiers    button            function              argument */
-	{ 0,            1,                i_navigate,           +1 },
-	{ 0,            3,                i_navigate,           -1 },
-	{ 0,            2,                i_drag,               None },
-	{ 0,            4,                i_scroll,             DIR_UP },
-	{ 0,            5,                i_scroll,             DIR_DOWN },
-	{ ShiftMask,    4,                i_scroll,             DIR_LEFT },
-	{ ShiftMask,    5,                i_scroll,             DIR_RIGHT },
-	{ 0,            6,                i_scroll,             DIR_LEFT },
-	{ 0,            7,                i_scroll,             DIR_RIGHT },
-	{ ControlMask,  4,                g_zoom,               +1 },
-	{ ControlMask,  5,                g_zoom,               -1 },
+	{ 0,            1,                i_cursor_navigate,    None },
+	{ 0,            2,                i_drag,               DRAG_ABSOLUTE },
+	{ 0,            3,                g_switch_mode,        None },
+	{ 0,            4,                g_zoom,               +1 },
+	{ 0,            5,                g_zoom,               -1 },
 };
 
 #endif

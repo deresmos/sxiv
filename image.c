@@ -16,19 +16,16 @@
  * along with sxiv.  If not, see <http://www.gnu.org/licenses/>.
  */
 
+#include "sxiv.h"
+#define _IMAGE_CONFIG
+#include "config.h"
+
 #include <errno.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
-
-#include "image.h"
-#include "options.h"
-#include "util.h"
-
-#define _IMAGE_CONFIG
-#include "config.h"
 
 #if HAVE_LIBEXIF
 #include <libexif/exif-data.h>
@@ -42,9 +39,9 @@ enum { DEF_GIF_DELAY = 75 };
 float zoom_min;
 float zoom_max;
 
-static int zoomdiff(float z1, float z2)
+static int zoomdiff(img_t *img, float z)
 {
-	return (int) (z1 * 1000.0 - z2 * 1000.0);
+	return (int) ((img->w * z - img->w * img->zoom) + (img->h * z - img->h * img->zoom));
 }
 
 void img_init(img_t *img, win_t *win)
@@ -296,21 +293,35 @@ bool img_load_gif(img_t *img, const fileinfo_t *file)
 }
 #endif /* HAVE_GIFLIB */
 
+Imlib_Image img_open(const fileinfo_t *file)
+{
+	struct stat st;
+	Imlib_Image im = NULL;
+
+	if (access(file->path, R_OK) == 0 &&
+	    stat(file->path, &st) == 0 && S_ISREG(st.st_mode))
+	{
+		im = imlib_load_image(file->path);
+		if (im != NULL) {
+			imlib_context_set_image(im);
+			if (imlib_image_get_data_for_reading_only() == NULL) {
+				imlib_free_image();
+				im = NULL;
+			}
+		}
+	}
+	if (im == NULL && (file->flags & FF_WARN))
+		error(0, 0, "%s: Error opening image", file->name);
+	return im;
+}
+
 bool img_load(img_t *img, const fileinfo_t *file)
 {
 	const char *fmt;
-	struct stat st;
 
-	if (access(file->path, R_OK) == -1 ||
-	    stat(file->path, &st) == -1 || !S_ISREG(st.st_mode) ||
-	    (img->im = imlib_load_image(file->path)) == NULL)
-	{
-		if (file->flags & FF_WARN)
-			error(0, 0, "%s: Error opening image", file->name);
+	if ((img->im = img_open(file)) == NULL)
 		return false;
-	}
 
-	imlib_context_set_image(img->im);
 	imlib_image_set_changes_on_disk();
 
 #if HAVE_LIBEXIF
@@ -355,8 +366,7 @@ CLEANUP void img_close(img_t *img, bool decache)
 void img_check_pan(img_t *img, bool moved)
 {
 	win_t *win;
-	int ox, oy;
-	float w, h;
+	float w, h, ox, oy;
 
 	win = img->win;
 	w = img->w * img->zoom;
@@ -383,12 +393,11 @@ void img_check_pan(img_t *img, bool moved)
 
 bool img_fit(img_t *img)
 {
-	float z, zmax, zw, zh;
+	float z, zw, zh;
 
 	if (img->scalemode == SCALE_ZOOM)
 		return false;
 
-	zmax = img->scalemode == SCALE_DOWN ? 1.0 : zoom_max;
 	zw = (float) img->win->w / (float) img->w;
 	zh = (float) img->win->h / (float) img->h;
 
@@ -403,11 +412,9 @@ bool img_fit(img_t *img)
 			z = MIN(zw, zh);
 			break;
 	}
+	z = MIN(z, img->scalemode == SCALE_DOWN ? 1.0 : zoom_max);
 
-	z = MAX(z, zoom_min);
-	z = MIN(z, zmax);
-
-	if (zoomdiff(z, img->zoom) != 0) {
+	if (zoomdiff(img, z) != 0) {
 		img->zoom = z;
 		img->dirty = true;
 		return true;
@@ -529,9 +536,16 @@ bool img_zoom(img_t *img, float z)
 
 	img->scalemode = SCALE_ZOOM;
 
-	if (zoomdiff(z, img->zoom) != 0) {
-		img->x = img->win->w / 2 - (img->win->w / 2 - img->x) * z / img->zoom;
-		img->y = img->win->h / 2 - (img->win->h / 2 - img->y) * z / img->zoom;
+	if (zoomdiff(img, z) != 0) {
+		int x, y;
+
+		win_cursor_pos(img->win, &x, &y);
+		if (x < 0 || x >= img->win->w || y < 0 || y >= img->win->h) {
+			x = img->win->w / 2;
+			y = img->win->h / 2;
+		}
+		img->x = x - (x - img->x) * z / img->zoom;
+		img->y = y - (y - img->y) * z / img->zoom;
 		img->zoom = z;
 		img->checkpan = true;
 		img->dirty = true;
@@ -546,9 +560,9 @@ bool img_zoom_in(img_t *img)
 	int i;
 	float z;
 
-	for (i = 1; i < ARRLEN(zoom_levels); i++) {
+	for (i = 0; i < ARRLEN(zoom_levels); i++) {
 		z = zoom_levels[i] / 100.0;
-		if (zoomdiff(z, img->zoom) > 0)
+		if (zoomdiff(img, z) > 0)
 			return img_zoom(img, z);
 	}
 	return false;
@@ -559,23 +573,23 @@ bool img_zoom_out(img_t *img)
 	int i;
 	float z;
 
-	for (i = ARRLEN(zoom_levels) - 2; i >= 0; i--) {
+	for (i = ARRLEN(zoom_levels) - 1; i >= 0; i--) {
 		z = zoom_levels[i] / 100.0;
-		if (zoomdiff(z, img->zoom) < 0)
+		if (zoomdiff(img, z) < 0)
 			return img_zoom(img, z);
 	}
 	return false;
 }
 
-bool img_move(img_t *img, float dx, float dy)
+bool img_pos(img_t *img, float x, float y)
 {
 	float ox, oy;
 
 	ox = img->x;
 	oy = img->y;
 
-	img->x += dx;
-	img->y += dy;
+	img->x = x;
+	img->y = y;
 
 	img_check_pan(img, true);
 
@@ -587,10 +601,15 @@ bool img_move(img_t *img, float dx, float dy)
 	}
 }
 
+bool img_move(img_t *img, float dx, float dy)
+{
+	return img_pos(img, img->x + dx, img->y + dy);
+}
+
 bool img_pan(img_t *img, direction_t dir, int d)
 {
 	/* d < 0: screen-wise
-	 * d = 0: 1/5 of screen
+	 * d = 0: 1/PAN_FRACTION of screen
 	 * d > 0: num of pixels
 	 */
 	float x, y;
@@ -598,8 +617,8 @@ bool img_pan(img_t *img, direction_t dir, int d)
 	if (d > 0) {
 		x = y = MAX(1, (float) d * img->zoom);
 	} else {
-		x = img->win->w / (d < 0 ? 1 : 5);
-		y = img->win->h / (d < 0 ? 1 : 5);
+		x = img->win->w / (d < 0 ? 1 : PAN_FRACTION);
+		y = img->win->h / (d < 0 ? 1 : PAN_FRACTION);
 	}
 
 	switch (dir) {
@@ -617,7 +636,7 @@ bool img_pan(img_t *img, direction_t dir, int d)
 
 bool img_pan_edge(img_t *img, direction_t dir)
 {
-	int ox, oy;
+	float ox, oy;
 
 	ox = img->x;
 	oy = img->y;
@@ -643,7 +662,8 @@ bool img_pan_edge(img_t *img, direction_t dir)
 
 void img_rotate(img_t *img, degree_t d)
 {
-	int i, ox, oy, tmp;
+	int i, tmp;
+	float ox, oy;
 
 	imlib_context_set_image(img->im);
 	imlib_image_orientate(d);

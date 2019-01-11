@@ -16,8 +16,11 @@
  * along with sxiv.  If not, see <http://www.gnu.org/licenses/>.
  */
 
+#include "sxiv.h"
+#define _THUMBS_CONFIG
+#include "config.h"
+
 #include <errno.h>
-#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/types.h>
@@ -25,16 +28,11 @@
 #include <unistd.h>
 #include <utime.h>
 
-#include "thumbs.h"
-#include "util.h"
-
-#define _THUMBS_CONFIG
-#include "config.h"
-
 #if HAVE_LIBEXIF
 #include <libexif/exif-data.h>
 void exif_auto_orientate(const fileinfo_t*);
 #endif
+Imlib_Image img_open(const fileinfo_t*);
 
 static char *cache_dir;
 
@@ -83,6 +81,9 @@ void tns_cache_write(Imlib_Image im, const char *filepath, bool force)
 	struct utimbuf times;
 	Imlib_Load_Error err = 0;
 
+	if (options->private_mode)
+		return;
+
 	if (stat(filepath, &fstats) < 0)
 		return;
 
@@ -119,8 +120,7 @@ void tns_cache_write(Imlib_Image im, const char *filepath, bool force)
 void tns_clean_cache(tns_t *tns)
 {
 	int dirlen;
-	bool delete;
-	char *cfile, *filename, *tpos;
+	char *cfile, *filename;
 	r_dir_t dir;
 
 	if (r_opendir(&dir, cache_dir, true) < 0) {
@@ -130,17 +130,9 @@ void tns_clean_cache(tns_t *tns)
 
 	dirlen = strlen(cache_dir);
 
-	while ((cfile = r_readdir(&dir)) != NULL) {
+	while ((cfile = r_readdir(&dir, false)) != NULL) {
 		filename = cfile + dirlen;
-		delete = false;
-
-		if ((tpos = strrchr(filename, '.')) != NULL) {
-			*tpos = '\0';
-			if (access(filename, F_OK) < 0)
-				delete = true;
-			*tpos = '.';
-		}
-		if (delete) {
+		if (access(filename, F_OK) < 0) {
 			if (unlink(cfile) < 0)
 				error(0, errno, "%s", cfile);
 		}
@@ -237,7 +229,6 @@ bool tns_load(tns_t *tns, int n, bool force, bool cache_only)
 	char *cfile;
 	thumb_t *t;
 	fileinfo_t *file;
-	struct stat st;
 	Imlib_Image im = NULL;
 
 	if (n < 0 || n >= *tns->cnt)
@@ -270,7 +261,7 @@ bool tns_load(tns_t *tns, int n, bool force, bool cache_only)
 				cache_hit = true;
 			}
 #if HAVE_LIBEXIF
-		} else if (!force) {
+		} else if (!force && !options->private_mode) {
 			int pw = 0, ph = 0, w, h, x = 0, y = 0;
 			bool err;
 			float zw, zh;
@@ -331,14 +322,8 @@ bool tns_load(tns_t *tns, int n, bool force, bool cache_only)
 	}
 
 	if (im == NULL) {
-		if (access(file->path, R_OK) == -1 ||
-		    stat(file->path, &st) == -1 || !S_ISREG(st.st_mode) ||
-		    (im = imlib_load_image(file->path)) == NULL)
-		{
-			if (file->flags & FF_WARN)
-				error(0, 0, "%s: Error opening image", file->name);
+		if ((im = img_open(file)) == NULL)
 			return false;
-		}
 	}
 	imlib_context_set_image(im);
 

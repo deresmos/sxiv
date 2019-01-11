@@ -16,11 +16,11 @@
  * along with sxiv.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#include "autoreload.h"
+#include "sxiv.h"
 
 void arl_init(arl_t *arl)
 {
-	(void) arl;
+	arl->fd = -1;
 }
 
 void arl_cleanup(arl_t *arl)

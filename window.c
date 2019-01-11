@@ -16,29 +16,31 @@
  * along with sxiv.  If not, see <http://www.gnu.org/licenses/>.
  */
 
+#include "sxiv.h"
+#define _WINDOW_CONFIG
+#include "config.h"
+#include "icon/data.h"
+#include "utf8.h"
+
 #include <stdlib.h>
 #include <string.h>
 #include <locale.h>
 #include <X11/cursorfont.h>
 #include <X11/Xatom.h>
 
-#include "options.h"
-#include "util.h"
-#include "window.h"
-#include "icon/data.h"
-
-#define _WINDOW_CONFIG
-#include "config.h"
-
 enum {
 	H_TEXT_PAD = 5,
 	V_TEXT_PAD = 1
 };
 
-static Cursor carrow;
-static Cursor cnone;
-static Cursor chand;
-static Cursor cwatch;
+static struct {
+	int name;
+	Cursor icon;
+} cursors[CURSOR_COUNT] = {
+	{ XC_left_ptr }, { XC_dotbox }, { XC_watch },
+	{ XC_sb_left_arrow }, { XC_sb_right_arrow }
+};
+
 static GC gc;
 
 static XftFont *font;
@@ -130,8 +132,11 @@ void win_init(win_t *win)
 
 	win->bar.l.size = BAR_L_LEN;
 	win->bar.r.size = BAR_R_LEN;
-	win->bar.l.buf = emalloc(win->bar.l.size);
-	win->bar.r.buf = emalloc(win->bar.r.size);
+	/* 3 padding bytes needed by utf8_decode */
+	win->bar.l.buf = emalloc(win->bar.l.size + 3);
+	win->bar.l.buf[0] = '\0';
+	win->bar.r.buf = emalloc(win->bar.r.size + 3);
+	win->bar.r.buf[0] = '\0';
 	win->bar.h = options->hide_bar ? 0 : barheight;
 
 	INIT_ATOM_(WM_DELETE_WINDOW);
@@ -153,6 +158,7 @@ void win_open(win_t *win)
 	XClassHint classhint;
 	unsigned long *icon_data;
 	XColor col;
+	Cursor *cnone = &cursors[CURSOR_NONE].icon;
 	char none_data[] = { 0, 0, 0, 0, 0, 0, 0, 0 };
 	Pixmap none;
 	int gmask;
@@ -209,17 +215,17 @@ void win_open(win_t *win)
 	             ButtonReleaseMask | ButtonPressMask | KeyPressMask |
 	             PointerMotionMask | StructureNotifyMask);
 
-	carrow = XCreateFontCursor(e->dpy, XC_left_ptr);
-	chand = XCreateFontCursor(e->dpy, XC_fleur);
-	cwatch = XCreateFontCursor(e->dpy, XC_watch);
-
+	for (i = 0; i < ARRLEN(cursors); i++) {
+		if (i != CURSOR_NONE)
+			cursors[i].icon = XCreateFontCursor(e->dpy, cursors[i].name);
+	}
 	if (XAllocNamedColor(e->dpy, DefaultColormap(e->dpy, e->scr), "black",
 	                     &col, &col) == 0)
 	{
 		error(EXIT_FAILURE, 0, "Error allocating color 'black'");
 	}
 	none = XCreateBitmapFromData(e->dpy, win->xwin, none_data, 8, 8);
-	cnone = XCreatePixmapCursor(e->dpy, none, none, &col, &col, 0, 0);
+	*cnone = XCreatePixmapCursor(e->dpy, none, none, &col, &col, 0, 0);
 
 	gc = XCreateGC(e->dpy, win->xwin, 0, None);
 
@@ -275,10 +281,10 @@ void win_open(win_t *win)
 
 CLEANUP void win_close(win_t *win)
 {
-	XFreeCursor(win->env.dpy, carrow);
-	XFreeCursor(win->env.dpy, cnone);
-	XFreeCursor(win->env.dpy, chand);
-	XFreeCursor(win->env.dpy, cwatch);
+	int i;
+
+	for (i = 0; i < ARRLEN(cursors); i++)
+		XFreeCursor(win->env.dpy, cursors[i].icon);
 
 	XFreeGC(win->env.dpy, gc);
 
@@ -358,11 +364,45 @@ void win_clear(win_t *win)
 	XFillRectangle(e->dpy, win->buf.pm, gc, 0, 0, win->buf.w, win->buf.h);
 }
 
+#define TEXTWIDTH(win, text, len) \
+	win_draw_text(win, NULL, NULL, 0, 0, text, len, 0)
+
+int win_draw_text(win_t *win, XftDraw *d, XftColor *color, int x, int y,
+                  char *text, int len, int w)
+{
+	int err, tw = 0;
+	char *t, *next;
+	uint32_t rune;
+	XftFont *f;
+	FcCharSet *fccharset;
+	XGlyphInfo ext;
+
+	for (t = text; t - text < len; t = next) {
+		next = utf8_decode(t, &rune, &err);
+		if (XftCharExists(win->env.dpy, font, rune)) {
+			f = font;
+		} else { /* fallback font */
+			fccharset = FcCharSetCreate();
+			FcCharSetAddChar(fccharset, rune);
+			f = XftFontOpen(win->env.dpy, win->env.scr, FC_CHARSET, FcTypeCharSet,
+			                fccharset, FC_SCALABLE, FcTypeBool, FcTrue, NULL);
+			FcCharSetDestroy(fccharset);
+		}
+		XftTextExtentsUtf8(win->env.dpy, f, (XftChar8*)t, next - t, &ext);
+		tw += ext.xOff;
+		if (tw <= w) {
+			XftDrawStringUtf8(d, color, f, x, y, (XftChar8*)t, next - t);
+			x += ext.xOff;
+		}
+		if (f != font)
+			XftFontClose(win->env.dpy, f);
+	}
+	return tw;
+}
+
 void win_draw_bar(win_t *win)
 {
-	int len, olen, x, y, w, tw;
-	char rest[3];
-	const char *dots = "...";
+	int len, x, y, w, tw;
 	win_env_t *e;
 	win_bar_t *l, *r;
 	XftDraw *d;
@@ -372,7 +412,7 @@ void win_draw_bar(win_t *win)
 
 	e = &win->env;
 	y = win->h + font->ascent + V_TEXT_PAD;
-	w = win->w;
+	w = win->w - 2*H_TEXT_PAD;
 	d = XftDrawCreate(e->dpy, win->buf.pm, DefaultVisual(e->dpy, e->scr),
 	                  DefaultColormap(e->dpy, e->scr));
 
@@ -383,29 +423,16 @@ void win_draw_bar(win_t *win)
 	XSetBackground(e->dpy, gc, win->bar.bgcol.pixel);
 
 	if ((len = strlen(r->buf)) > 0) {
-		if ((tw = win_textwidth(e, r->buf, len, true)) > w)
+		if ((tw = TEXTWIDTH(win, r->buf, len)) > w)
 			return;
-		x = win->w - tw + H_TEXT_PAD;
+		x = win->w - tw - H_TEXT_PAD;
 		w -= tw;
-		XftDrawStringUtf8(d, &win->bar.fgcol, font, x, y, (XftChar8*)r->buf, len);
+		win_draw_text(win, d, &win->bar.fgcol, x, y, r->buf, len, tw);
 	}
 	if ((len = strlen(l->buf)) > 0) {
-		olen = len;
-		while (len > 0 && (tw = win_textwidth(e, l->buf, len, true)) > w)
-			len--;
-		if (len > 0) {
-			if (len != olen) {
-				w = strlen(dots);
-				if (len <= w)
-					return;
-				memcpy(rest, l->buf + len - w, w);
-				memcpy(l->buf + len - w, dots, w);
-			}
-			x = H_TEXT_PAD;
-			XftDrawStringUtf8(d, &win->bar.fgcol, font, x, y, (XftChar8*)l->buf, len);
-			if (len != olen)
-			  memcpy(l->buf + len - w, rest, w);
-		}
+		x = H_TEXT_PAD;
+		w -= 2 * H_TEXT_PAD; /* gap between left and right parts */
+		win_draw_text(win, d, &win->bar.fgcol, x, y, l->buf, len, w);
 	}
 	XftDrawDestroy(d);
 }
@@ -435,19 +462,8 @@ void win_draw_rect(win_t *win, int x, int y, int w, int h, bool fill, int lw,
 		XDrawRectangle(win->env.dpy, win->buf.pm, gc, x, y, w, h);
 }
 
-int win_textwidth(const win_env_t *e, const char *text, unsigned int len, bool with_padding)
-{
-	XGlyphInfo ext;
-
-	XftTextExtentsUtf8(e->dpy, font, (XftChar8*)text, len, &ext);
-	return ext.xOff + (with_padding ? 2 * H_TEXT_PAD : 0);
-}
-
 void win_set_title(win_t *win, const char *title)
 {
-	if (title == NULL)
-		title = "sxiv";
-
 	XStoreName(win->env.dpy, win->xwin, title);
 	XSetIconName(win->env.dpy, win->xwin, title);
 
@@ -461,21 +477,19 @@ void win_set_title(win_t *win, const char *title)
 
 void win_set_cursor(win_t *win, cursor_t cursor)
 {
-	switch (cursor) {
-		case CURSOR_NONE:
-			XDefineCursor(win->env.dpy, win->xwin, cnone);
-			break;
-		case CURSOR_HAND:
-			XDefineCursor(win->env.dpy, win->xwin, chand);
-			break;
-		case CURSOR_WATCH:
-			XDefineCursor(win->env.dpy, win->xwin, cwatch);
-			break;
-		case CURSOR_ARROW:
-		default:
-			XDefineCursor(win->env.dpy, win->xwin, carrow);
-			break;
+	if (cursor >= 0 && cursor < ARRLEN(cursors)) {
+		XDefineCursor(win->env.dpy, win->xwin, cursors[cursor].icon);
+		XFlush(win->env.dpy);
 	}
-
-	XFlush(win->env.dpy);
 }
+
+void win_cursor_pos(win_t *win, int *x, int *y)
+{
+	int i;
+	unsigned int ui;
+	Window w;
+
+	if (!XQueryPointer(win->env.dpy, win->xwin, &w, &w, &i, &i, x, y, &ui))
+		*x = *y = 0;
+}
+

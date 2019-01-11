@@ -1,66 +1,87 @@
-VERSION   := git-20170517
+version = 24+
 
-PREFIX    := /usr/local
-MANPREFIX := $(PREFIX)/share/man
+srcdir = .
+VPATH = $(srcdir)
 
-CC        ?= gcc
-CFLAGS    += -std=c99 -Wall -pedantic
-CPPFLAGS  += -I/usr/include/freetype2 -D_XOPEN_SOURCE=700
-LDFLAGS   += 
-LIBS      := -lImlib2 -lX11 -lXft
+PREFIX = /usr/local
+MANPREFIX = $(PREFIX)/share/man
 
-# optional dependencies:
-# giflib: gif animations
-ifndef NO_GIFLIB
-	CPPFLAGS += -DHAVE_GIFLIB
-	LIBS     += -lgif
-endif
-# libexif: jpeg auto-orientation, exif thumbnails
-ifndef NO_LIBEXIF
-	CPPFLAGS += -DHAVE_LIBEXIF
-	LIBS     += -lexif
-endif
+# autoreload backend: inotify/nop
+AUTORELOAD = inotify
 
-# select autoreload backend
-# overwritten with `make AUTORELOAD=nop`
-AUTORELOAD := inotify
+# enable features requiring giflib (-lgif)
+HAVE_GIFLIB = 1
 
-.PHONY: clean install uninstall
+# enable features requiring libexif (-lexif)
+HAVE_LIBEXIF = 1
 
-SRC := autoreload_$(AUTORELOAD).c commands.c image.c main.c options.c thumbs.c util.c window.c
-DEP := $(SRC:.c=.d)
-OBJ := $(SRC:.c=.o)
+cflags = -std=c99 -Wall -pedantic $(CFLAGS)
+cppflags = -I. $(CPPFLAGS) -D_XOPEN_SOURCE=700 -DHAVE_GIFLIB=$(HAVE_GIFLIB) \
+  -DHAVE_LIBEXIF=$(HAVE_LIBEXIF) -I/usr/include/freetype2
 
-all: config.h sxiv
+lib_exif_0 =
+lib_exif_1 = -lexif
+lib_gif_0 =
+lib_gif_1 = -lgif
+ldlibs = $(LDLIBS) -lImlib2 -lX11 -lXft -lfontconfig \
+  $(lib_exif_$(HAVE_LIBEXIF)) $(lib_gif_$(HAVE_GIFLIB))
 
-$(OBJ): Makefile
+objs = autoreload_$(AUTORELOAD).o commands.o image.o main.o options.o \
+  thumbs.o util.o window.o
 
--include $(DEP)
+all: sxiv
 
-%.o: %.c
-	$(CC) $(CFLAGS) $(CPPFLAGS) -DVERSION=\"$(VERSION)\" -MMD -MP -c -o $@ $<
+.PHONY: all clean install uninstall
+.SUFFIXES:
+.SUFFIXES: .c .o
+$(V).SILENT:
+
+sxiv: $(objs)
+	@echo "LINK $@"
+	$(CC) $(LDFLAGS) -o $@ $(objs) $(ldlibs)
+
+$(objs): Makefile sxiv.h commands.lst config.h
+options.o: version.h
+window.o: icon/data.h
+
+.c.o:
+	@echo "CC $@"
+	$(CC) $(cflags) $(cppflags) -c -o $@ $<
 
 config.h:
-	cp config.def.h $@
+	@echo "GEN $@"
+	cp $(srcdir)/config.def.h $@
 
-sxiv:	$(OBJ)
-	$(CC) $(LDFLAGS) -o $@ $(OBJ) $(LIBS)
+version.h: Makefile .git/index
+	@echo "GEN $@"
+	v="$$(cd $(srcdir); git describe 2>/dev/null)"; \
+	echo "#define VERSION \"$${v:-$(version)}\"" >$@
+
+.git/index:
 
 clean:
-	rm -f $(OBJ) $(DEP) sxiv
+	rm -f *.o sxiv
 
 install: all
+	@echo "INSTALL bin/sxiv"
 	mkdir -p $(DESTDIR)$(PREFIX)/bin
 	cp sxiv $(DESTDIR)$(PREFIX)/bin/
 	chmod 755 $(DESTDIR)$(PREFIX)/bin/sxiv
+	@echo "INSTALL sxiv.1"
 	mkdir -p $(DESTDIR)$(MANPREFIX)/man1
-	sed "s!PREFIX!$(PREFIX)!g; s!VERSION!$(VERSION)!g" sxiv.1 > $(DESTDIR)$(MANPREFIX)/man1/sxiv.1
+	sed "s!PREFIX!$(PREFIX)!g; s!VERSION!$(version)!g" sxiv.1 \
+		>$(DESTDIR)$(MANPREFIX)/man1/sxiv.1
 	chmod 644 $(DESTDIR)$(MANPREFIX)/man1/sxiv.1
+	@echo "INSTALL share/sxiv/"
 	mkdir -p $(DESTDIR)$(PREFIX)/share/sxiv/exec
 	cp exec/* $(DESTDIR)$(PREFIX)/share/sxiv/exec/
 	chmod 755 $(DESTDIR)$(PREFIX)/share/sxiv/exec/*
 
 uninstall:
+	@echo "REMOVE bin/sxiv"
 	rm -f $(DESTDIR)$(PREFIX)/bin/sxiv
+	@echo "REMOVE sxiv.1"
 	rm -f $(DESTDIR)$(MANPREFIX)/man1/sxiv.1
+	@echo "REMOVE share/sxiv/"
 	rm -rf $(DESTDIR)$(PREFIX)/share/sxiv
+
