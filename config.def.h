@@ -6,19 +6,10 @@ enum {
 	WIN_HEIGHT = 600
 };
 
-/* bar font:
- * (see fonts-conf(5) subsection "FONT NAMES" for valid values)
+/* colors and font are configured with 'background', 'foreground' and
+ * 'font' X resource properties.
+ * See X(7) section Resources and xrdb(1) for more information.
  */
-static const char * const BAR_FONT = "migu1m:size=8";
-
-/* colors:
- * (see X(7) section "COLOR NAMES" for valid values)
- */
-static const char * const WIN_BG_COLOR = "#555555";
-static const char * const WIN_FS_COLOR = "#000000";
-static const char * const SEL_COLOR    = "#EEEEEE";
-static const char * const BAR_BG_COLOR = "#222222";
-static const char * const BAR_FG_COLOR = "#EEEEEE";
 
 #endif
 #ifdef _IMAGE_CONFIG
