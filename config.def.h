@@ -61,7 +61,7 @@ static const bool HIDE_BAR = true;
 #ifdef _THUMBS_CONFIG
 
 /* thumbnail sizes in pixels (width == height): */
-static const int thumb_sizes[] = { 32, 64, 96, 128, 224, 320, 5122 };
+static const int thumb_sizes[] = { 32, 64, 96, 128, 224, 320, 512 };
 
 /* thumbnail size at startup, index into thumb_sizes[]: */
 static const int THUMB_SIZE = 4;
